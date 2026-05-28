@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-svc
+spec:
+  replicas: {{ .Values.notificationSvc.replicas }}
+  selector:
+    matchLabels:
+      app: notification-svc
+  template:
+    metadata:
+      labels:
+        app: notification-svc
+    spec:
+      containers:
+        - name: notification-svc
+          image: "{{ .Values.notificationSvc.image }}:{{ .Values.notificationSvc.tag }}"
+          env:
+            - name: RABBITMQ_URL
+              value: "amqp://{{ .Values.rabbitmq.user }}:{{ .Values.rabbitmq.password }}@rabbitmq:{{ .Values.rabbitmq.port }}/"

@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package catalog;
+
+service CatalogService {
+  rpc CheckProduct (CheckProductRequest) returns (CheckProductResponse);
+}
+
+message CheckProductRequest {
+  int32 product_id = 1;
+}
+
+message CheckProductResponse {
+  bool exists = 1;
+  double price = 2;
+  string name = 3;
+}

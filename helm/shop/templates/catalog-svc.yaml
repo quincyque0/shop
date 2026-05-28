@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-svc
+spec:
+  replicas: {{ .Values.catalogSvc.replicas }}
+  selector:
+    matchLabels:
+      app: catalog-svc
+  template:
+    metadata:
+      labels:
+        app: catalog-svc
+    spec:
+      containers:
+        - name: catalog-svc
+          image: "{{ .Values.catalogSvc.image }}:{{ .Values.catalogSvc.tag }}"
+          ports:
+            - containerPort: {{ .Values.catalogSvc.port }}
+            - containerPort: {{ .Values.catalogSvc.grpcPort }}
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres:{{ .Values.postgres.port }}/{{ .Values.postgres.database }}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-svc
+spec:
+  selector:
+    app: catalog-svc
+  ports:
+    - name: http
+      port: {{ .Values.catalogSvc.port }}
+      targetPort: {{ .Values.catalogSvc.port }}
+    - name: grpc
+      port: {{ .Values.catalogSvc.grpcPort }}
+      targetPort: {{ .Values.catalogSvc.grpcPort }}

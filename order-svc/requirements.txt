@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+sqlalchemy
+asyncpg
+grpcio
+grpcio-tools
+pydantic
+aio-pika

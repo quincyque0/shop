@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-svc
+spec:
+  replicas: {{ .Values.orderSvc.replicas }}
+  selector:
+    matchLabels:
+      app: order-svc
+  template:
+    metadata:
+      labels:
+        app: order-svc
+    spec:
+      containers:
+        - name: order-svc
+          image: "{{ .Values.orderSvc.image }}:{{ .Values.orderSvc.tag }}"
+          ports:
+            - containerPort: {{ .Values.orderSvc.port }}
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres:{{ .Values.postgres.port }}/{{ .Values.postgres.database }}"
+            - name: RABBITMQ_URL
+              value: "amqp://{{ .Values.rabbitmq.user }}:{{ .Values.rabbitmq.password }}@rabbitmq:{{ .Values.rabbitmq.port }}/"
+            - name: CATALOG_GRPC_URL
+              value: "catalog-svc:{{ .Values.catalogSvc.grpcPort }}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-svc
+spec:
+  selector:
+    app: order-svc
+  ports:
+    - port: {{ .Values.orderSvc.port }}
+      targetPort: {{ .Values.orderSvc.port }}

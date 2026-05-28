@@ -1,0 +1,45 @@
+## ---------- Общие ----------
+namespace: shop
+
+## ---------- Образы ----------
+catalogSvc:
+  image: shop/catalog-svc
+  tag: latest
+  replicas: 1
+  port: 8000
+  grpcPort: 50051
+
+orderSvc:
+  image: shop/order-svc
+  tag: latest
+  replicas: 1
+  port: 8000
+
+notificationSvc:
+  image: shop/notification-svc
+  tag: latest
+  replicas: 1
+
+apiGateway:
+  image: shop/api-gateway
+  tag: latest
+  replicas: 1
+  port: 8000
+  serviceType: LoadBalancer
+
+## ---------- PostgreSQL ----------
+postgres:
+  image: postgres:15-alpine
+  user: user
+  password: password
+  database: shop_db
+  port: 5432
+  storage: 1Gi
+
+## ---------- RabbitMQ ----------
+rabbitmq:
+  image: rabbitmq:3-management-alpine
+  user: user
+  password: password
+  port: 5672
+  managementPort: 15672
