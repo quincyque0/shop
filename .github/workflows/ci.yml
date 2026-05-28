@@ -1,0 +1,181 @@
+name: CI/CD
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'week-17/**'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'week-17/**'
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/shop
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api-gateway, catalog-svc, order-svc, notification-svc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: pip install flake8
+      - run: flake8 week-17/${{ matrix.service }}/ --max-line-length=120 --ignore=E501,W503
+  lint-dockerfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install hadolint
+        run: |
+          wget -qO hadolint https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+          chmod +x hadolint
+          sudo mv hadolint /usr/local/bin/
+      - run: |
+          for svc in api-gateway catalog-svc order-svc notification-svc; do
+            hadolint --config week-17/.hadolint.yaml week-17/$svc/Dockerfile
+          done
+  lint-helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint week-17/helm/shop/
+      - run: helm lint week-17/helm/shop/ -f week-17/helm/shop/values-staging.yaml
+      - run: helm lint week-17/helm/shop/ -f week-17/helm/shop/values-production.yaml
+  build:
+    runs-on: ubuntu-latest
+    needs: [lint, lint-dockerfile]
+    strategy:
+      matrix:
+        service: [api-gateway, catalog-svc, order-svc, notification-svc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: week-17/${{ matrix.service }}
+          push: false
+          load: true
+          tags: shop/${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start services
+        working-directory: week-17
+        run: docker compose up --build -d
+      - name: Wait for readiness
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/health > /dev/null 2>&1 && break
+            sleep 3
+          done
+          curl -f http://localhost:8000/health
+      - name: Test create product
+        run: |
+          curl -sf -X POST http://localhost:8000/api/products \
+            -H "Content-Type: application/json" \
+            -d '{"name":"CI Test","description":"CI","price":99.99,"stock":10}'
+      - name: Test list products
+        run: curl -sf http://localhost:8000/api/products
+      - name: Test create order
+        run: |
+          curl -sf -X POST http://localhost:8000/api/orders \
+            -H "Content-Type: application/json" \
+            -d '{"product_id":1,"quantity":2,"customer_email":"ci@test.com"}'
+      - name: Test list orders
+        run: curl -sf http://localhost:8000/api/orders
+      - name: Logs on failure
+        if: failure()
+        working-directory: week-17
+        run: docker compose logs --tail=50
+      - name: Stop services
+        if: always()
+        working-directory: week-17
+        run: docker compose down -v
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api-gateway, catalog-svc, order-svc, notification-svc]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t shop/${{ matrix.service }}:scan week-17/${{ matrix.service }}/
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: shop/${{ matrix.service }}:scan
+          format: table
+          exit-code: "0"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+  publish:
+    runs-on: ubuntu-latest
+    needs: [integration-test, security-scan]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [api-gateway, catalog-svc, order-svc, notification-svc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
+          tags: |
+            type=sha
+            type=raw,value=latest
+            type=ref,event=branch
+      - uses: docker/build-push-action@v6
+        with:
+          context: week-17/${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: publish
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: |
+          helm template shop week-17/helm/shop/ \
+            -f week-17/helm/shop/values-staging.yaml \
+            --set catalogSvc.tag=${{ github.sha }} \
+            --set orderSvc.tag=${{ github.sha }} \
+            --set notificationSvc.tag=${{ github.sha }} \
+            --set apiGateway.tag=${{ github.sha }}
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: |
+          helm template shop week-17/helm/shop/ \
+            -f week-17/helm/shop/values-production.yaml \
+            --set catalogSvc.tag=${{ github.sha }} \
+            --set orderSvc.tag=${{ github.sha }} \
+            --set notificationSvc.tag=${{ github.sha }} \
+            --set apiGateway.tag=${{ github.sha }}
