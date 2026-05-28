@@ -39,8 +39,3 @@
 | **Publish** | Push образов в GitHub Container Registry (ghcr.io) | Только push в main |
 | **Deploy Staging** | Helm deploy/dry-run в staging namespace | После publish |
 | **Deploy Production** | Helm deploy/dry-run в production namespace (manual approval) | После staging |
-
-### Тегирование образов
-- `sha-<commit>` — уникальный тег для каждого коммита
-- `latest` — последняя версия из main
-- `main` — тег по имени ветки

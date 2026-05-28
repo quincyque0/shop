@@ -25,7 +25,7 @@
 
 ## 4. Как организован деплой?
 
-**Локально:** `docker compose up --build` (или `make up`)
+**Локально:** `docker compose up --build` 
 
 **CI/CD:** GitHub Actions с 6-стадийным пайплайном:
 

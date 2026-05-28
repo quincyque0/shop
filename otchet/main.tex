@@ -1,0 +1,372 @@
+\documentclass[14pt]{article}
+\input{preamble}
+
+\begin{document}
+
+\input{titlepage}
+
+\tableofcontents
+\newpage
+
+\section{Введение}
+
+Целью данной работы является проектирование и реализация микросервисной архитектуры для интернет-магазина. Проект объединяет знания, полученные на протяжении курса: REST API, gRPC, Docker, очереди сообщений (RabbitMQ), базы данных PostgreSQL.
+
+Система состоит из нескольких независимых сервисов, каждый из которых отвечает за свою предметную область: каталог товаров, обработка заказов, уведомления и единая точка входа (API Gateway).
+
+\section{Постановка задачи}
+
+Необходимо:
+\begin{enumerate}
+    \item Спроектировать систему из нескольких микросервисов.
+    \item Описать архитектуру в \texttt{ARCHITECTURE.md}.
+    \item Реализовать код сервисов с использованием REST и gRPC.
+    \item Упаковать всё в Docker и обеспечить запуск через \texttt{docker-compose up}.
+    \item Настроить CI/CD конвейер (GitHub Actions) для автоматической проверки, сборки и деплоя.
+    \item Подготовить Helm-чарты для развертывания в Kubernetes.
+    \item Обеспечить слабую связность: падение одного сервиса не должно блокировать другие.
+\end{enumerate}
+
+\section{Архитектура системы}
+
+\subsection{Обзор компонентов}
+
+Проект состоит из следующих сервисов:
+
+\begin{itemize}
+    \item \textbf{API Gateway} --- единая точка входа, проксирует запросы к внутренним сервисам по HTTP.
+    \item \textbf{Catalog Service} --- управление каталогом товаров (REST API + gRPC сервер).
+    \item \textbf{Order Service} --- создание и просмотр заказов, проверка товара через gRPC, отправка событий в RabbitMQ.
+    \item \textbf{Notification Service} --- потребитель очереди, обрабатывает события о создании заказов.
+    \item \textbf{PostgreSQL} --- реляционная база данных для хранения товаров и заказов.
+    \item \textbf{RabbitMQ} --- брокер сообщений для асинхронного взаимодействия между сервисами.
+\end{itemize}
+
+\subsection{Схема взаимодействия}
+
+Внешние клиенты отправляют HTTP-запросы к API Gateway (порт 8000), который проксирует их к соответствующим сервисам:
+
+\begin{itemize}
+    \item \texttt{/api/products} $\rightarrow$ Catalog Service (HTTP)
+    \item \texttt{/api/orders} $\rightarrow$ Order Service (HTTP)
+\end{itemize}
+
+При создании заказа Order Service:
+\begin{enumerate}
+    \item Проверяет наличие товара через \textbf{gRPC} вызов к Catalog Service (порт 50051).
+    \item Рассчитывает стоимость заказа.
+    \item Сохраняет заказ в PostgreSQL.
+    \item Публикует событие \texttt{OrderCreated} в очередь \texttt{notifications} через \textbf{RabbitMQ}.
+\end{enumerate}
+
+Notification Service прослушивает очередь и логирует уведомления.
+
+\subsection{Используемые протоколы}
+
+\begin{center}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Связь} & \textbf{Протокол} & \textbf{Обоснование} \\
+\hline
+Клиент $\rightarrow$ API Gateway & HTTP/REST & Универсальность, удобство \\
+\hline
+API Gateway $\rightarrow$ Сервисы & HTTP/REST & Проксирование запросов \\
+\hline
+Order $\rightarrow$ Catalog & gRPC & Низкая задержка, типизация \\
+\hline
+Order $\rightarrow$ Notification & RabbitMQ & Асинхронность, надёжность \\
+\hline
+\end{tabular}
+\end{center}
+
+\section{Реализация}
+
+\subsection{Стек технологий}
+
+\begin{itemize}
+    \item \textbf{Язык}: Python 3.10
+    \item \textbf{Фреймворк}: FastAPI (асинхронный)
+    \item \textbf{ORM}: SQLAlchemy (asyncpg)
+    \item \textbf{gRPC}: grpcio, grpc-tools
+    \item \textbf{Брокер}: RabbitMQ 3 (aio-pika)
+    \item \textbf{БД}: PostgreSQL 15
+    \item \textbf{Контейнеризация}: Docker, Docker Compose
+\end{itemize}
+
+\subsection{Catalog Service}
+
+Сервис каталога предоставляет REST API для CRUD-операций с товарами и gRPC-интерфейс для проверки наличия товара.
+
+\textbf{Модель данных (models.py):}
+\begin{lstlisting}[language=Python]
+class Product(Base):
+    __tablename__ = "products"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    description = Column(String, nullable=True)
+    price = Column(Float, nullable=False)
+    stock = Column(Integer, default=0)
+\end{lstlisting}
+
+\textbf{Proto-файл (catalog.proto):}
+\begin{lstlisting}[language=C]
+syntax = "proto3";
+package catalog;
+
+service CatalogService {
+  rpc CheckProduct (CheckProductRequest)
+      returns (CheckProductResponse);
+}
+
+message CheckProductRequest {
+  int32 product_id = 1;
+}
+
+message CheckProductResponse {
+  bool exists = 1;
+  double price = 2;
+  string name = 3;
+}
+\end{lstlisting}
+
+\textbf{REST-эндпоинты:}
+\begin{itemize}
+    \item \texttt{POST /api/products} --- создание товара
+    \item \texttt{GET /api/products} --- список товаров
+\end{itemize}
+
+\subsection{Order Service}
+
+Сервис заказов использует gRPC для проверки товара в каталоге и RabbitMQ для отправки уведомлений.
+
+\textbf{Модель данных (models.py):}
+\begin{lstlisting}[language=Python]
+class Order(Base):
+    __tablename__ = "orders"
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, index=True)
+    quantity = Column(Integer, nullable=False)
+    total_price = Column(Float, nullable=False)
+    status = Column(String, default="CREATED")
+    customer_email = Column(String)
+\end{lstlisting}
+
+\textbf{Ключевая логика создания заказа:}
+\begin{lstlisting}[language=Python]
+@app.post("/api/orders", response_model=OrderOut)
+async def create_order(order: OrderCreate,
+                       session: AsyncSession = Depends(get_session)):
+    catalog_response = await check_product_in_catalog(
+        order.product_id)
+    if not catalog_response.exists:
+        raise HTTPException(status_code=404,
+            detail="Product not found in catalog")
+
+    total_price = catalog_response.price * order.quantity
+
+    new_order = Order(
+        product_id=order.product_id,
+        quantity=order.quantity,
+        total_price=total_price,
+        customer_email=order.customer_email,
+        status="CREATED"
+    )
+    session.add(new_order)
+    await session.commit()
+
+    if mq_channel:
+        message_body = json.dumps({
+            "event": "OrderCreated",
+            "order_id": new_order.id,
+            "product_name": catalog_response.name,
+            "total_price": new_order.total_price,
+            "customer_email": new_order.customer_email
+        }).encode()
+        await mq_channel.default_exchange.publish(
+            aio_pika.Message(body=message_body),
+            routing_key="notifications",
+        )
+    return new_order
+\end{lstlisting}
+
+\subsection{API Gateway}
+
+API Gateway реализован как обратный прокси на базе FastAPI и httpx. Он маршрутизирует запросы:
+\begin{itemize}
+    \item \texttt{/api/products*} $\rightarrow$ \texttt{catalog-svc:8000}
+    \item \texttt{/api/orders*} $\rightarrow$ \texttt{order-svc:8000}
+\end{itemize}
+
+\begin{lstlisting}[language=Python]
+async def proxy_request(request, base_url, path):
+    url = f"{base_url}/{path}"
+    async with httpx.AsyncClient() as client:
+        req_body = await request.body()
+        response = await client.request(
+            method=request.method,
+            url=url,
+            headers=dict(request.headers),
+            content=req_body,
+            params=request.query_params
+        )
+        return JSONResponse(
+            content=response.json(),
+            status_code=response.status_code)
+\end{lstlisting}
+
+Также предоставляет эндпоинт \texttt{/health} для проверки состояния.
+
+\subsection{Notification Service}
+
+Сервис уведомлений --- автономный консьюмер RabbitMQ, который обрабатывает события из очереди \texttt{notifications}:
+
+\begin{lstlisting}[language=Python]
+async def process_message(message):
+    async with message.process():
+        body = json.loads(message.body.decode())
+        event = body.get("event")
+        if event == "OrderCreated":
+            logger.info(
+                f"SENDING EMAIL to {body['customer_email']}: "
+                f"Order #{body['order_id']} created!")
+\end{lstlisting}
+
+Сервис устойчив к недоступности RabbitMQ: в цикле ожидает подключения с паузой 2 секунды.
+
+\section{Инфраструктура}
+
+\subsection{Docker}
+
+Каждый сервис упакован в Docker-образ на базе \texttt{python:3.10-slim}. Dockerfile для Catalog Service включает сборку gRPC-кода из proto-файла:
+
+\begin{lstlisting}[language=bash]
+FROM python:3.10-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y gcc g++
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+RUN python -m grpc_tools.protoc -I. \
+    --python_out=. --grpc_python_out=. catalog.proto
+CMD ["python", "main.py"]
+\end{lstlisting}
+
+\subsection{Docker Compose}
+
+Файл \texttt{docker-compose.yml} описывает все 6 сервисов:
+
+\begin{lstlisting}[language=yaml]
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: shop_db
+    healthcheck:
+      test: ["CMD-SHELL",
+             "pg_isready -U user -d shop_db"]
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+
+  api-gateway:
+    build: ./api-gateway
+    ports: ["8000:8000"]
+    depends_on: [catalog-svc, order-svc]
+
+  catalog-svc:
+    build: ./catalog-svc
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  order-svc:
+    build: ./order-svc
+    depends_on:
+      postgres: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  notification-svc:
+    build: ./notification-svc
+    depends_on:
+      rabbitmq: {condition: service_healthy}
+\end{lstlisting}
+
+Используются healthcheck'и для PostgreSQL и RabbitMQ, чтобы зависимые сервисы запускались только после готовности инфраструктуры.
+
+\subsection{Запуск проекта}
+
+\begin{lstlisting}[language=bash]
+docker-compose up --build
+\end{lstlisting}
+
+После запуска API доступен на \texttt{http://localhost:8000}.
+
+\subsection{Helm и Kubernetes}
+
+Для развертывания приложения в кластере Kubernetes подготовлен Helm-чарт (\texttt{helm/shop}). Он включает в себя манифесты Deployment и Service для всех микросервисов, а также зависимости для базы данных и брокера сообщений. Чарт поддерживает переопределение параметров для различных окружений (файлы \texttt{values-staging.yaml} и \texttt{values-production.yaml}).
+
+\subsection{CI/CD Пайплайн (GitHub Actions)}
+
+Настроен полноценный конвейер непрерывной интеграции и доставки (CI/CD) с использованием GitHub Actions. Пайплайн состоит из 6 стадий:
+\begin{enumerate}
+    \item \textbf{Lint}: Проверка кода Python (\texttt{flake8}), Docker-файлов (\texttt{hadolint}) и Helm-чартов (\texttt{helm lint}).
+    \item \textbf{Build \& Test}: Сборка Docker-образов и запуск интеграционных тестов.
+    \item \textbf{Security Scan}: Поиск уязвимостей в собранных образах с помощью \texttt{Trivy}.
+    \item \textbf{Publish}: Публикация протестированных образов в GitHub Container Registry (ghcr.io).
+    \item \textbf{Deploy Staging}: Генерация манифестов Helm и деплой в staging окружение.
+    \item \textbf{Deploy Production}: Деплой в production окружение (с требованием ручного подтверждения).
+\end{enumerate}
+
+\section{Связность и отказоустойчивость}
+
+\begin{itemize}
+    \item \textbf{Слабая связность}: сервисы взаимодействуют через сетевые протоколы (HTTP, gRPC, AMQP), а не через общий код. Падение Notification Service не влияет на создание заказов.
+    \item \textbf{Graceful degradation}: Order Service корректно обрабатывает недоступность RabbitMQ --- заказ создаётся, но уведомление не отправляется.
+    \item \textbf{Retry-логика}: Notification Service повторяет попытки подключения к RabbitMQ с интервалом 2 секунды.
+    \item \textbf{Healthcheck}: PostgreSQL и RabbitMQ проверяются на готовность перед запуском зависимых сервисов.
+\end{itemize}
+
+\section{Ответы на контрольные вопросы}
+
+\textbf{1. Какие критерии использовались при разделении на микросервисы?}
+
+Разделение выполнено по принципу \emph{bounded context} (DDD): каждый сервис отвечает за свою предметную область --- каталог, заказы, уведомления. Критерии: независимость развёртывания, единая ответственность, минимизация связей.
+
+\textbf{2. Почему выбран именно этот стек технологий?}
+
+Python и FastAPI обеспечивают высокую скорость разработки и встроенную поддержку async/await. PostgreSQL~--- надёжная СУБД с поддержкой транзакций. gRPC~--- эффективный протокол для межсервисного взаимодействия. RabbitMQ~--- зрелый брокер сообщений.
+
+\textbf{3. Как сервисы справляются с ошибками?}
+
+Order Service перехватывает \texttt{grpc.RpcError} и возвращает HTTP 503 при недоступности Catalog. Подключение к RabbitMQ происходит через \texttt{connect\_robust} с автопереподключением. Notification Service использует цикл с \texttt{await asyncio.sleep(2)} для ожидания RabbitMQ.
+
+\textbf{4. Как организован деплой?}
+
+Локально~--- через \texttt{docker-compose up}. Продакшен деплой автоматизирован через 6-стадийный CI/CD пайплайн GitHub Actions, который собирает образы, проверяет их на уязвимости, публикует в ghcr.io и разворачивает в Kubernetes с помощью Helm-чартов (окружения staging и production).
+
+\textbf{5. Что было самым сложным?}
+
+Обеспечение корректного порядка запуска сервисов (healthcheck и depends\_on) и интеграция gRPC-сервера в lifespan FastAPI-приложения.
+
+\textbf{6. Что можно улучшить?}
+
+Добавить распределённый трейсинг (OpenTelemetry), централизованный сбор логов (ELK), circuit breaker для gRPC-вызовов, и полноценную отправку email.
+
+\section{Заключение}
+
+В ходе выполнения финального проекта была спроектирована и реализована микросервисная система интернет-магазина, включающая:
+\begin{itemize}
+    \item 4 микросервиса с чётким разделением ответственности;
+    \item межсервисное взаимодействие через REST, gRPC и RabbitMQ;
+    \item полную контейнеризацию с Docker Compose;
+    \item автоматизированный CI/CD пайплайн (GitHub Actions) и Helm-чарты для Kubernetes;
+    \item обработку ошибок и graceful degradation.
+\end{itemize}
+
+Проект запускается одной командой \texttt{docker-compose up} и демонстрирует применение ключевых паттернов распределённых систем.
+
+\end{document}
